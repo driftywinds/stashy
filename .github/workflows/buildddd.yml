@@ -5,65 +5,197 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
-  workflow_dispatch: # lets you trigger it manually from the GitHub UI
+
+  workflow_dispatch:
+    inputs:
+      build_windows:
+        description: "Windows (x64) — stash-win.exe"
+        type: boolean
+        default: true
+      build_linux:
+        description: "Linux (x64) — stash-linux"
+        type: boolean
+        default: true
+      build_linux_arm64:
+        description: "Linux ARM64 — stash-linux-arm64v8"
+        type: boolean
+        default: false
+      build_linux_arm32v7:
+        description: "Linux ARM32v7 — stash-linux-arm32v7"
+        type: boolean
+        default: false
+      build_linux_arm32v6:
+        description: "Linux ARM32v6 — stash-linux-arm32v6"
+        type: boolean
+        default: false
+      build_macos:
+        description: "macOS universal (Intel + Apple Silicon) — stash-macos"
+        type: boolean
+        default: false
+      build_freebsd:
+        description: "FreeBSD (x64) — stash-freebsd"
+        type: boolean
+        default: false
+
+env:
+  COMPILER_IMAGE: ghcr.io/stashapp/compiler:13
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
 
+  # ── Job 1: Generate code and build the UI ─────────────────────────────────
+  generate:
+    runs-on: ubuntu-24.04
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────────
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
-      # ── 2. Go toolchain ────────────────────────────────────────────────────
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24.3"
-          cache: true                 # caches the Go module download cache
-
-      # ── 3. Node.js + pnpm ──────────────────────────────────────────────────
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+          go-version-file: go.mod
+          cache: true
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: "10.30.3"          # must match packageManager field in package.json
+          package_json_file: ui/v2.5/package.json
 
-      # ── 4. Install C compiler (required by go-sqlite3) ─────────────────────
-      - name: Install GCC
-        run: sudo apt-get install -y gcc
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: ui/v2.5/pnpm-lock.yaml
 
-      # ── 5. Generate GraphQL types (frontend needs these before building) ───
-      - name: Generate GraphQL types
+      - name: Install UI dependencies
         working-directory: ui/v2.5
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm run gqlgen
+        run: pnpm install --frozen-lockfile
 
-      # ── 6. Build the frontend ──────────────────────────────────────────────
-      - name: Build frontend
-        working-directory: ui/v2.5
-        run: pnpm run build
+      - name: Generate (backend + frontend GraphQL types)
+        run: make generate
 
-      # ── 7. Generate login locale (embeds the login page translations) ──────
-      - name: Generate login locale
-        run: go generate ./ui
+      - name: Build UI
+        run: make ui
 
-      # ── 8. Build the Go backend ────────────────────────────────────────────
-      - name: Build backend
-        env:
-          CGO_ENABLED: "1"            # required for go-sqlite3
-        run: go build -o stash ./cmd/stash/
-
-      # ── 9. Upload the binary as a build artifact ───────────────────────────
-      - name: Upload binary
+      - name: Upload generated artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: stash-linux
-          path: stash
-          retention-days: 7           # keeps it for a week so you can download and test
+          name: generated
+          retention-days: 1
+          path: |
+            internal/api/generated_exec.go
+            internal/api/generated_models.go
+            ui/v2.5/build/
+            ui/login/locales/
+
+  # ── Job 2: Work out which platforms to build ──────────────────────────────
+  # Produces a JSON matrix that the build job consumes.
+  # On push/PR every platform is included; on manual dispatch only the
+  # checked ones are included — unchecked platforms produce zero jobs.
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.compute.outputs.matrix }}
+    steps:
+      - name: Compute build matrix
+        id: compute
+        run: |
+          # All platform definitions as a bash array of JSON objects
+          declare -a entries
+
+          # Helper: is this platform enabled?
+          # On push/PR everything is enabled.
+          # On workflow_dispatch only checked inputs are enabled.
+          event="${{ github.event_name }}"
+
+          want_windows="true"
+          want_linux="true"
+          want_arm64="false"
+          want_arm32v7="false"
+          want_arm32v6="false"
+          want_macos="false"
+          want_freebsd="false"
+
+          if [[ "$event" == "workflow_dispatch" ]]; then
+            want_windows="${{ inputs.build_windows }}"
+            want_linux="${{ inputs.build_linux }}"
+            want_arm64="${{ inputs.build_linux_arm64 }}"
+            want_arm32v7="${{ inputs.build_linux_arm32v7 }}"
+            want_arm32v6="${{ inputs.build_linux_arm32v6 }}"
+            want_macos="${{ inputs.build_macos }}"
+            want_freebsd="${{ inputs.build_freebsd }}"
+          fi
+
+          [[ "$want_windows"  == "true" ]] && entries+=('{"platform":"windows",      "make_target":"build-cc-windows",      "artifact_name":"stash-windows",       "artifact_path":"dist/stash-win.exe"}')
+          [[ "$want_linux"    == "true" ]] && entries+=('{"platform":"linux",         "make_target":"build-cc-linux",        "artifact_name":"stash-linux",         "artifact_path":"dist/stash-linux"}')
+          [[ "$want_arm64"    == "true" ]] && entries+=('{"platform":"linux-arm64v8", "make_target":"build-cc-linux-arm64v8","artifact_name":"stash-linux-arm64v8", "artifact_path":"dist/stash-linux-arm64v8"}')
+          [[ "$want_arm32v7"  == "true" ]] && entries+=('{"platform":"linux-arm32v7", "make_target":"build-cc-linux-arm32v7","artifact_name":"stash-linux-arm32v7", "artifact_path":"dist/stash-linux-arm32v7"}')
+          [[ "$want_arm32v6"  == "true" ]] && entries+=('{"platform":"linux-arm32v6", "make_target":"build-cc-linux-arm32v6","artifact_name":"stash-linux-arm32v6", "artifact_path":"dist/stash-linux-arm32v6"}')
+          [[ "$want_macos"    == "true" ]] && entries+=('{"platform":"macos",         "make_target":"build-cc-macos",        "artifact_name":"stash-macos",         "artifact_path":"dist/stash-macos"}')
+          [[ "$want_freebsd"  == "true" ]] && entries+=('{"platform":"freebsd",       "make_target":"build-cc-freebsd",      "artifact_name":"stash-freebsd",       "artifact_path":"dist/stash-freebsd"}')
+
+          # Join entries into a JSON array
+          json="["
+          for i in "${!entries[@]}"; do
+            [[ $i -gt 0 ]] && json+=","
+            json+="${entries[$i]}"
+          done
+          json+="]"
+
+          echo "matrix={\"include\":$json}" >> "$GITHUB_OUTPUT"
+
+  # ── Job 3: Build matrix ────────────────────────────────────────────────────
+  # Only runs for platforms included in the matrix computed above.
+  build:
+    needs: [generate, setup]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download generated artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: generated
+
+      - name: Cache Go build
+        uses: actions/cache@v4
+        with:
+          path: .go-cache
+          key: ${{ runner.os }}-go-${{ matrix.platform }}-${{ hashFiles('go.mod', 'go.sum') }}
+
+      - name: Pull compiler image
+        run: docker pull $COMPILER_IMAGE
+
+      - name: Start build container
+        run: |
+          mkdir -p .go-cache dist
+          docker run -d --name build \
+            --mount type=bind,source="$(pwd)",target=/stash,consistency=delegated \
+            --mount type=bind,source="$(pwd)/.go-cache",target=/root/.cache/go-build,consistency=delegated \
+            -w /stash \
+            $COMPILER_IMAGE tail -f /dev/null
+
+      - name: Build ${{ matrix.platform }}
+        run: docker exec -t build /bin/bash -c "make ${{ matrix.make_target }}"
+
+      - name: Stop build container
+        if: always()
+        run: docker rm -f -v build
+
+      - name: Upload ${{ matrix.artifact_name }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          retention-days: 7
