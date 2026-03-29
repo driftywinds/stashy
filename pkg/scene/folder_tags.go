@@ -11,11 +11,14 @@ import (
 	"github.com/stashapp/stash/pkg/models"
 )
 
-// FolderTagWriterReader is the subset of the tag and scene repositories
-// needed for folder-based tag auto-creation and assignment.
-type FolderTagWriterReader interface {
+// FolderTagManager is the tag-side repository needed for folder tag creation.
+type FolderTagManager interface {
 	models.TagFinder
 	models.TagCreator
+}
+
+// FolderSceneUpdater is the scene-side repository needed for folder tag assignment.
+type FolderSceneUpdater interface {
 	models.TagIDLoader
 	models.SceneUpdater
 }
@@ -26,9 +29,9 @@ type FolderTagWriterReader interface {
 // Each tag name is the slash-joined relative path from the library root down
 // to the scene's immediate parent folder, built up incrementally:
 //
-//   root:  /media
-//   file:  /media/Movies/Action/Die Hard.mkv
-//   tags:  ["Movies", "Movies/Action"]
+//	root:  /media
+//	file:  /media/Movies/Action/Die Hard.mkv
+//	tags:  ["Movies", "Movies/Action"]
 //
 // Files sitting directly in the root (no sub-folder) are skipped.
 func TagsFromFolderPath(filePath string, libraryRoots []string) []string {
@@ -50,12 +53,12 @@ func TagsFromFolderPath(filePath string, libraryRoots []string) []string {
 // EnsureFolderTags creates (if absent) one tag per element of tagNames,
 // wiring each tag's parent to the tag for the previous element so the tag
 // tree mirrors the folder hierarchy. Returns IDs in order (shallowest first).
-func EnsureFolderTags(ctx context.Context, rw FolderTagWriterReader, tagNames []string) ([]int, error) {
+func EnsureFolderTags(ctx context.Context, tagRW FolderTagManager, tagNames []string) ([]int, error) {
 	ids := make([]int, 0, len(tagNames))
 	var parentID *int
 
 	for _, name := range tagNames {
-		existing, err := rw.FindByName(ctx, name, false)
+		existing, err := tagRW.FindByName(ctx, name, false)
 		if err != nil {
 			return nil, fmt.Errorf("finding tag %q: %w", name, err)
 		}
@@ -87,7 +90,7 @@ func EnsureFolderTags(ctx context.Context, rw FolderTagWriterReader, tagNames []
 		}
 
 		input := &models.CreateTagInput{Tag: newTag}
-		if err := rw.Create(ctx, input); err != nil {
+		if err := tagRW.Create(ctx, input); err != nil {
 			return nil, fmt.Errorf("creating folder tag %q: %w", name, err)
 		}
 		logger.Infof("[folder-tags] created tag %q (id=%d)", name, newTag.ID)
@@ -101,7 +104,10 @@ func EnsureFolderTags(ctx context.Context, rw FolderTagWriterReader, tagNames []
 
 // AssignFolderTags ensures the folder-derived tags exist and adds any missing
 // ones to the scene's tag list without removing manually-added tags.
-func AssignFolderTags(ctx context.Context, s *models.Scene, rw FolderTagWriterReader, libraryRoots []string) error {
+//
+// tagRW is typically r.Tag (the tag store).
+// sceneRW is typically r.Scene (the scene store — it holds GetTagIDs for scenes).
+func AssignFolderTags(ctx context.Context, s *models.Scene, tagRW FolderTagManager, sceneRW FolderSceneUpdater, libraryRoots []string) error {
 	if s.Path == "" {
 		return nil
 	}
@@ -111,12 +117,13 @@ func AssignFolderTags(ctx context.Context, s *models.Scene, rw FolderTagWriterRe
 		return nil
 	}
 
-	tagIDs, err := EnsureFolderTags(ctx, rw, tagNames)
+	tagIDs, err := EnsureFolderTags(ctx, tagRW, tagNames)
 	if err != nil {
 		return err
 	}
 
-	if err := s.LoadTagIDs(ctx, rw); err != nil {
+	// LoadTagIDs uses the scene store (TagIDLoader is on SceneReaderWriter).
+	if err := s.LoadTagIDs(ctx, sceneRW); err != nil {
 		return fmt.Errorf("loading tag IDs for scene %d: %w", s.ID, err)
 	}
 	existing := s.TagIDs.List()
@@ -142,7 +149,7 @@ func AssignFolderTags(ctx context.Context, s *models.Scene, rw FolderTagWriterRe
 			Mode: models.RelationshipUpdateModeSet,
 		},
 	}
-	if _, err := rw.UpdatePartial(ctx, s.ID, partial); err != nil {
+	if _, err := sceneRW.UpdatePartial(ctx, s.ID, partial); err != nil {
 		return fmt.Errorf("updating scene %d tags: %w", s.ID, err)
 	}
 	logger.Debugf("[folder-tags] assigned %v to scene %d", tagNames, s.ID)

@@ -137,7 +137,7 @@ func extractEmbeddedSubtitles(ctx context.Context, enc *ffmpeg.FFMpeg, videoPath
 		}
 
 		// Skip if already extracted (avoids re-running ffmpeg on every rescan).
-		if fsutil.FileExistsNoErr(outPath) {
+		if exists, _ := fsutil.FileExists(outPath); exists {
 			logger.Debugf("[subtitles] skipping already-extracted %s", outPath)
 			continue
 		}

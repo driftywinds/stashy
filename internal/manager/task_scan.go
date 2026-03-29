@@ -705,7 +705,7 @@ func getScanHandlers(options ScanMetadataInput, taskQueue *job.TaskQueue, progre
 				},
 				FileNamingAlgorithm: c.GetVideoFileNamingAlgorithm(),
 				Paths:               mgr.Paths,
-				FolderTagWriter:     r.Tag,
+				FolderTagManager:    r.Tag,
 				LibraryRoots:        c.GetStashPaths().Paths(),
 			},
 		},
