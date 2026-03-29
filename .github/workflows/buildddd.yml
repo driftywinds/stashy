@@ -1,13 +1,11 @@
 name: Build Stash
 
-# ── Triggers ──────────────────────────────────────────────────────────────────
 on:
   push:
     branches: ["**"]
   pull_request:
     branches: ["**"]
 
-  # Manual trigger with per-platform checkboxes
   workflow_dispatch:
     inputs:
       build_windows:
@@ -39,15 +37,12 @@ on:
         type: boolean
         default: false
 
-# ── Shared env ────────────────────────────────────────────────────────────────
 env:
   COMPILER_IMAGE: ghcr.io/stashapp/compiler:13
 
 jobs:
 
-  # ── Job 1: Generate all code and build the UI ───────────────────────────────
-  # Everything downstream (test + build matrix) depends on the files this
-  # job produces: generated Go files and the compiled frontend bundle.
+  # ── Job 1: Generate code and build the UI ─────────────────────────────────
   generate:
     runs-on: ubuntu-24.04
     steps:
@@ -79,16 +74,12 @@ jobs:
         working-directory: ui/v2.5
         run: pnpm install --frozen-lockfile
 
-      # Produces internal/api/generated_exec.go + generated_models.go
-      # and ui/v2.5/src/core/generated-graphql.ts
       - name: Generate (backend + frontend GraphQL types)
         run: make generate
 
-      # Produces ui/v2.5/build/ and ui/login/locales/
       - name: Build UI
         run: make ui
 
-      # Pass generated files to all downstream jobs via artifact cache
       - name: Upload generated artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -100,87 +91,70 @@ jobs:
             ui/v2.5/build/
             ui/login/locales/
 
-  # ── Job 2: Build matrix ─────────────────────────────────────────────────────
-  # Each platform runs in its own job using the upstream compiler Docker image
-  # (same image the official Stash CI uses) so cross-compilation just works.
-  build:
-    needs: generate
+  # ── Job 2: Work out which platforms to build ──────────────────────────────
+  # Produces a JSON matrix that the build job consumes.
+  # On push/PR every platform is included; on manual dispatch only the
+  # checked ones are included — unchecked platforms produce zero jobs.
+  setup:
     runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.compute.outputs.matrix }}
+    steps:
+      - name: Compute build matrix
+        id: compute
+        run: |
+          # All platform definitions as a bash array of JSON objects
+          declare -a entries
 
+          # Helper: is this platform enabled?
+          # On push/PR everything is enabled.
+          # On workflow_dispatch only checked inputs are enabled.
+          event="${{ github.event_name }}"
+
+          want_windows="true"
+          want_linux="true"
+          want_arm64="false"
+          want_arm32v7="false"
+          want_arm32v6="false"
+          want_macos="false"
+          want_freebsd="false"
+
+          if [[ "$event" == "workflow_dispatch" ]]; then
+            want_windows="${{ inputs.build_windows }}"
+            want_linux="${{ inputs.build_linux }}"
+            want_arm64="${{ inputs.build_linux_arm64 }}"
+            want_arm32v7="${{ inputs.build_linux_arm32v7 }}"
+            want_arm32v6="${{ inputs.build_linux_arm32v6 }}"
+            want_macos="${{ inputs.build_macos }}"
+            want_freebsd="${{ inputs.build_freebsd }}"
+          fi
+
+          [[ "$want_windows"  == "true" ]] && entries+=('{"platform":"windows",      "make_target":"build-cc-windows",      "artifact_name":"stash-windows",       "artifact_path":"dist/stash-win.exe"}')
+          [[ "$want_linux"    == "true" ]] && entries+=('{"platform":"linux",         "make_target":"build-cc-linux",        "artifact_name":"stash-linux",         "artifact_path":"dist/stash-linux"}')
+          [[ "$want_arm64"    == "true" ]] && entries+=('{"platform":"linux-arm64v8", "make_target":"build-cc-linux-arm64v8","artifact_name":"stash-linux-arm64v8", "artifact_path":"dist/stash-linux-arm64v8"}')
+          [[ "$want_arm32v7"  == "true" ]] && entries+=('{"platform":"linux-arm32v7", "make_target":"build-cc-linux-arm32v7","artifact_name":"stash-linux-arm32v7", "artifact_path":"dist/stash-linux-arm32v7"}')
+          [[ "$want_arm32v6"  == "true" ]] && entries+=('{"platform":"linux-arm32v6", "make_target":"build-cc-linux-arm32v6","artifact_name":"stash-linux-arm32v6", "artifact_path":"dist/stash-linux-arm32v6"}')
+          [[ "$want_macos"    == "true" ]] && entries+=('{"platform":"macos",         "make_target":"build-cc-macos",        "artifact_name":"stash-macos",         "artifact_path":"dist/stash-macos"}')
+          [[ "$want_freebsd"  == "true" ]] && entries+=('{"platform":"freebsd",       "make_target":"build-cc-freebsd",      "artifact_name":"stash-freebsd",       "artifact_path":"dist/stash-freebsd"}')
+
+          # Join entries into a JSON array
+          json="["
+          for i in "${!entries[@]}"; do
+            [[ $i -gt 0 ]] && json+=","
+            json+="${entries[$i]}"
+          done
+          json+="]"
+
+          echo "matrix={\"include\":$json}" >> "$GITHUB_OUTPUT"
+
+  # ── Job 3: Build matrix ────────────────────────────────────────────────────
+  # Only runs for platforms included in the matrix computed above.
+  build:
+    needs: [generate, setup]
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
-      matrix:
-        include:
-
-          # Windows — always built on push/PR; gated by checkbox on manual runs
-          - platform: windows
-            make_target: build-cc-windows
-            artifact_name: stash-windows
-            artifact_path: dist/stash-win.exe
-            apt_deps: ""
-            enabled_expr: >-
-              github.event_name != 'workflow_dispatch' ||
-              inputs.build_windows == true
-
-          # Linux x64 — always built on push/PR
-          - platform: linux
-            make_target: build-cc-linux
-            artifact_name: stash-linux
-            artifact_path: dist/stash-linux
-            apt_deps: ""
-            enabled_expr: >-
-              github.event_name != 'workflow_dispatch' ||
-              inputs.build_linux == true
-
-          # Linux ARM64
-          - platform: linux-arm64v8
-            make_target: build-cc-linux-arm64v8
-            artifact_name: stash-linux-arm64v8
-            artifact_path: dist/stash-linux-arm64v8
-            apt_deps: ""
-            enabled_expr: >-
-              github.event_name != 'workflow_dispatch' ||
-              inputs.build_linux_arm64 == true
-
-          # Linux ARM32v7
-          - platform: linux-arm32v7
-            make_target: build-cc-linux-arm32v7
-            artifact_name: stash-linux-arm32v7
-            artifact_path: dist/stash-linux-arm32v7
-            apt_deps: ""
-            enabled_expr: >-
-              github.event_name != 'workflow_dispatch' ||
-              inputs.build_linux_arm32v7 == true
-
-          # Linux ARM32v6
-          - platform: linux-arm32v6
-            make_target: build-cc-linux-arm32v6
-            artifact_name: stash-linux-arm32v6
-            artifact_path: dist/stash-linux-arm32v6
-            apt_deps: ""
-            enabled_expr: >-
-              github.event_name != 'workflow_dispatch' ||
-              inputs.build_linux_arm32v6 == true
-
-          # macOS universal (Intel + Apple Silicon, combined with lipo)
-          - platform: macos
-            make_target: build-cc-macos
-            artifact_name: stash-macos
-            artifact_path: dist/stash-macos
-            apt_deps: ""
-            enabled_expr: >-
-              github.event_name != 'workflow_dispatch' ||
-              inputs.build_macos == true
-
-          # FreeBSD
-          - platform: freebsd
-            make_target: build-cc-freebsd
-            artifact_name: stash-freebsd
-            artifact_path: dist/stash-freebsd
-            apt_deps: ""
-            enabled_expr: >-
-              github.event_name != 'workflow_dispatch' ||
-              inputs.build_freebsd == true
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     steps:
       - name: Checkout
@@ -189,13 +163,11 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      # Restore generated Go + UI files produced by the generate job
       - name: Download generated artifacts
         uses: actions/download-artifact@v4
         with:
           name: generated
 
-      # Cache Go build output between runs to speed up recompilation
       - name: Cache Go build
         uses: actions/cache@v4
         with:
@@ -215,15 +187,13 @@ jobs:
             $COMPILER_IMAGE tail -f /dev/null
 
       - name: Build ${{ matrix.platform }}
-        if: ${{ fromJSON(matrix.enabled_expr) }}
         run: docker exec -t build /bin/bash -c "make ${{ matrix.make_target }}"
 
       - name: Stop build container
         if: always()
         run: docker rm -f -v build
 
-      - name: Upload ${{ matrix.platform }} binary
-        if: ${{ fromJSON(matrix.enabled_expr) }}
+      - name: Upload ${{ matrix.artifact_name }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
