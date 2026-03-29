@@ -88,6 +88,8 @@ type VideoFile struct {
 	JSON        FFProbeJSON
 	AudioStream *FFProbeStream
 	VideoStream *FFProbeStream
+	// SubtitleStreams holds all subtitle streams found in the file (e.g. embedded MKV subs).
+	SubtitleStreams []FFProbeStream
 
 	Path      string
 	Title     string
@@ -299,6 +301,14 @@ func parse(filePath string, probeJSON *FFProbeJSON) (*VideoFile, error) {
 	if audioStream != nil {
 		result.AudioCodec = audioStream.CodecName
 		result.AudioStream = audioStream
+	}
+
+	// Collect all embedded subtitle streams.
+	for i := range probeJSON.Streams {
+		s := &probeJSON.Streams[i]
+		if s.CodecType == "subtitle" {
+			result.SubtitleStreams = append(result.SubtitleStreams, *s)
+		}
 	}
 
 	videoStream := result.getVideoStream()

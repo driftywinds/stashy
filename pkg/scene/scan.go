@@ -53,6 +53,13 @@ type ScanHandler struct {
 
 	FileNamingAlgorithm models.HashAlgorithm
 	Paths               *paths.Paths
+
+	// FolderTagWriter is used to create / query tags for folder-based categorisation.
+	// When set alongside LibraryRoots, each scene is tagged with its folder hierarchy
+	// relative to the matching library root (e.g. "Movies", "Movies/Action").
+	FolderTagWriter FolderTagWriterReader
+	// LibraryRoots is the list of configured library root paths (from stash config).
+	LibraryRoots []string
 }
 
 func (h *ScanHandler) validate() error {
@@ -137,6 +144,20 @@ func (h *ScanHandler) Handle(ctx context.Context, f models.File, oldFile models.
 
 	if err := h.associateGallery(ctx, existing, f); err != nil {
 		return err
+	}
+
+	// Assign folder-based tags if configured.
+	if h.FolderTagWriter != nil && len(h.LibraryRoots) > 0 {
+		for _, s := range existing {
+			if s.Path == "" {
+				if err := s.LoadFiles(ctx, h.CreatorUpdater); err == nil && s.Files.Primary() != nil {
+					s.Path = s.Files.Primary().Base().Path
+				}
+			}
+			if err := AssignFolderTags(ctx, s, h.FolderTagWriter, h.LibraryRoots); err != nil {
+				logger.Warnf("folder tag assignment for scene %d: %v", s.ID, err)
+			}
+		}
 	}
 
 	// do this after the commit so that cover generation doesn't hold up the transaction
