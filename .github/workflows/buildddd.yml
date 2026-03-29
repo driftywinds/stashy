@@ -1,38 +1,73 @@
 name: Build Stash
 
+# ── Triggers ──────────────────────────────────────────────────────────────────
 on:
   push:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+
+  # Manual trigger with per-platform checkboxes
   workflow_dispatch:
+    inputs:
+      build_windows:
+        description: "Windows (x64) — stash-win.exe"
+        type: boolean
+        default: true
+      build_linux:
+        description: "Linux (x64) — stash-linux"
+        type: boolean
+        default: true
+      build_linux_arm64:
+        description: "Linux ARM64 — stash-linux-arm64v8"
+        type: boolean
+        default: false
+      build_linux_arm32v7:
+        description: "Linux ARM32v7 — stash-linux-arm32v7"
+        type: boolean
+        default: false
+      build_linux_arm32v6:
+        description: "Linux ARM32v6 — stash-linux-arm32v6"
+        type: boolean
+        default: false
+      build_macos:
+        description: "macOS universal (Intel + Apple Silicon) — stash-macos"
+        type: boolean
+        default: false
+      build_freebsd:
+        description: "FreeBSD (x64) — stash-freebsd"
+        type: boolean
+        default: false
+
+# ── Shared env ────────────────────────────────────────────────────────────────
+env:
+  COMPILER_IMAGE: ghcr.io/stashapp/compiler:13
 
 jobs:
-  build:
-    runs-on: ubuntu-24.04
 
+  # ── Job 1: Generate all code and build the UI ───────────────────────────────
+  # Everything downstream (test + build matrix) depends on the files this
+  # job produces: generated Go files and the compiled frontend bundle.
+  generate:
+    runs-on: ubuntu-24.04
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────────
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
 
-      # ── 2. Go toolchain ────────────────────────────────────────────────────
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      # ── 3. pnpm (version read from packageManager field in package.json) ───
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
           package_json_file: ui/v2.5/package.json
 
-      # ── 4. Node.js ─────────────────────────────────────────────────────────
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -40,34 +75,157 @@ jobs:
           cache: pnpm
           cache-dependency-path: ui/v2.5/pnpm-lock.yaml
 
-      # ── 5. Install frontend dependencies ───────────────────────────────────
       - name: Install UI dependencies
         working-directory: ui/v2.5
         run: pnpm install --frozen-lockfile
 
-      # ── 6. Generate — runs both generate-backend (go generate ./cmd/stash)
-      #        and generate-ui (pnpm gqlgen). This produces:
-      #          • internal/api/generated_exec.go
-      #          • internal/api/generated_models.go
-      #          • ui/v2.5/src/core/generated-graphql.ts
-      # ───────────────────────────────────────────────────────────────────────
+      # Produces internal/api/generated_exec.go + generated_models.go
+      # and ui/v2.5/src/core/generated-graphql.ts
       - name: Generate (backend + frontend GraphQL types)
         run: make generate
 
-      # ── 7. Build UI (pnpm build + login locale embed → ui/v2.5/build/) ─────
+      # Produces ui/v2.5/build/ and ui/login/locales/
       - name: Build UI
         run: make ui
 
-      # ── 8. Build Go binary (CGO_ENABLED=1 required for go-sqlite3) ─────────
-      - name: Build backend
-        env:
-          CGO_ENABLED: "1"
-        run: go build -o stash ./cmd/stash/
-
-      # ── 9. Upload binary so you can download and test it ───────────────────
-      - name: Upload binary
+      # Pass generated files to all downstream jobs via artifact cache
+      - name: Upload generated artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: stash-linux
-          path: stash
+          name: generated
+          retention-days: 1
+          path: |
+            internal/api/generated_exec.go
+            internal/api/generated_models.go
+            ui/v2.5/build/
+            ui/login/locales/
+
+  # ── Job 2: Build matrix ─────────────────────────────────────────────────────
+  # Each platform runs in its own job using the upstream compiler Docker image
+  # (same image the official Stash CI uses) so cross-compilation just works.
+  build:
+    needs: generate
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+
+          # Windows — always built on push/PR; gated by checkbox on manual runs
+          - platform: windows
+            make_target: build-cc-windows
+            artifact_name: stash-windows
+            artifact_path: dist/stash-win.exe
+            apt_deps: ""
+            enabled_expr: >-
+              github.event_name != 'workflow_dispatch' ||
+              inputs.build_windows == true
+
+          # Linux x64 — always built on push/PR
+          - platform: linux
+            make_target: build-cc-linux
+            artifact_name: stash-linux
+            artifact_path: dist/stash-linux
+            apt_deps: ""
+            enabled_expr: >-
+              github.event_name != 'workflow_dispatch' ||
+              inputs.build_linux == true
+
+          # Linux ARM64
+          - platform: linux-arm64v8
+            make_target: build-cc-linux-arm64v8
+            artifact_name: stash-linux-arm64v8
+            artifact_path: dist/stash-linux-arm64v8
+            apt_deps: ""
+            enabled_expr: >-
+              github.event_name != 'workflow_dispatch' ||
+              inputs.build_linux_arm64 == true
+
+          # Linux ARM32v7
+          - platform: linux-arm32v7
+            make_target: build-cc-linux-arm32v7
+            artifact_name: stash-linux-arm32v7
+            artifact_path: dist/stash-linux-arm32v7
+            apt_deps: ""
+            enabled_expr: >-
+              github.event_name != 'workflow_dispatch' ||
+              inputs.build_linux_arm32v7 == true
+
+          # Linux ARM32v6
+          - platform: linux-arm32v6
+            make_target: build-cc-linux-arm32v6
+            artifact_name: stash-linux-arm32v6
+            artifact_path: dist/stash-linux-arm32v6
+            apt_deps: ""
+            enabled_expr: >-
+              github.event_name != 'workflow_dispatch' ||
+              inputs.build_linux_arm32v6 == true
+
+          # macOS universal (Intel + Apple Silicon, combined with lipo)
+          - platform: macos
+            make_target: build-cc-macos
+            artifact_name: stash-macos
+            artifact_path: dist/stash-macos
+            apt_deps: ""
+            enabled_expr: >-
+              github.event_name != 'workflow_dispatch' ||
+              inputs.build_macos == true
+
+          # FreeBSD
+          - platform: freebsd
+            make_target: build-cc-freebsd
+            artifact_name: stash-freebsd
+            artifact_path: dist/stash-freebsd
+            apt_deps: ""
+            enabled_expr: >-
+              github.event_name != 'workflow_dispatch' ||
+              inputs.build_freebsd == true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Restore generated Go + UI files produced by the generate job
+      - name: Download generated artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: generated
+
+      # Cache Go build output between runs to speed up recompilation
+      - name: Cache Go build
+        uses: actions/cache@v4
+        with:
+          path: .go-cache
+          key: ${{ runner.os }}-go-${{ matrix.platform }}-${{ hashFiles('go.mod', 'go.sum') }}
+
+      - name: Pull compiler image
+        run: docker pull $COMPILER_IMAGE
+
+      - name: Start build container
+        run: |
+          mkdir -p .go-cache dist
+          docker run -d --name build \
+            --mount type=bind,source="$(pwd)",target=/stash,consistency=delegated \
+            --mount type=bind,source="$(pwd)/.go-cache",target=/root/.cache/go-build,consistency=delegated \
+            -w /stash \
+            $COMPILER_IMAGE tail -f /dev/null
+
+      - name: Build ${{ matrix.platform }}
+        if: ${{ fromJSON(matrix.enabled_expr) }}
+        run: docker exec -t build /bin/bash -c "make ${{ matrix.make_target }}"
+
+      - name: Stop build container
+        if: always()
+        run: docker rm -f -v build
+
+      - name: Upload ${{ matrix.platform }} binary
+        if: ${{ fromJSON(matrix.enabled_expr) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
           retention-days: 7
