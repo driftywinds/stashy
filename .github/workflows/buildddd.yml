@@ -11,15 +11,15 @@ on:
       build_windows:
         description: "Windows (x64) — stash-win.exe"
         type: boolean
-        default: true
+        default: false
       build_linux:
         description: "Linux (x64) — stash-linux"
         type: boolean
-        default: true
+        default: false
       build_linux_arm64:
         description: "Linux ARM64 — stash-linux-arm64v8"
         type: boolean
-        default: false
+        default: true
       build_linux_arm32v7:
         description: "Linux ARM32v7 — stash-linux-arm32v7"
         type: boolean
