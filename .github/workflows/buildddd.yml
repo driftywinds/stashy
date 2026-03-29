@@ -1,0 +1,69 @@
+name: Build Stash
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch: # lets you trigger it manually from the GitHub UI
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Go toolchain ────────────────────────────────────────────────────
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.3"
+          cache: true                 # caches the Go module download cache
+
+      # ── 3. Node.js + pnpm ──────────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.30.3"          # must match packageManager field in package.json
+
+      # ── 4. Install C compiler (required by go-sqlite3) ─────────────────────
+      - name: Install GCC
+        run: sudo apt-get install -y gcc
+
+      # ── 5. Generate GraphQL types (frontend needs these before building) ───
+      - name: Generate GraphQL types
+        working-directory: ui/v2.5
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run gqlgen
+
+      # ── 6. Build the frontend ──────────────────────────────────────────────
+      - name: Build frontend
+        working-directory: ui/v2.5
+        run: pnpm run build
+
+      # ── 7. Generate login locale (embeds the login page translations) ──────
+      - name: Generate login locale
+        run: go generate ./ui
+
+      # ── 8. Build the Go backend ────────────────────────────────────────────
+      - name: Build backend
+        env:
+          CGO_ENABLED: "1"            # required for go-sqlite3
+        run: go build -o stash ./cmd/stash/
+
+      # ── 9. Upload the binary as a build artifact ───────────────────────────
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: stash-linux
+          path: stash
+          retention-days: 7           # keeps it for a week so you can download and test
