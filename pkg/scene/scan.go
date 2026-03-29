@@ -19,8 +19,6 @@ import (
 var (
 	ErrNotVideoFile = errors.New("not a video file")
 
-	// fingerprint types to match with
-	// only try to match by data fingerprints, _not_ perceptual fingerprints
 	matchableFingerprintTypes = []string{models.FingerprintTypeOshash, models.FingerprintTypeMD5}
 )
 
@@ -33,7 +31,6 @@ type ScanCreatorUpdater interface {
 	UpdatePartial(ctx context.Context, id int, updatedScene models.ScenePartial) (*models.Scene, error)
 	AddFileID(ctx context.Context, id int, fileID models.FileID) error
 
-	// GetTagIDs is needed for folder-based tag assignment (loads a scene's existing tags).
 	models.TagIDLoader
 }
 
@@ -57,13 +54,8 @@ type ScanHandler struct {
 	FileNamingAlgorithm models.HashAlgorithm
 	Paths               *paths.Paths
 
-	// FolderTagManager is used to create / query tags for folder-based categorisation.
-	// Set this to r.Tag.  When set alongside LibraryRoots, each scene is tagged
-	// with its folder hierarchy relative to the matching library root
-	// (e.g. "Movies", "Movies/Action").
 	FolderTagManager FolderTagManager
-	// LibraryRoots is the list of configured library root paths (from stash config).
-	LibraryRoots []string
+	LibraryRoots     []string
 }
 
 func (h *ScanHandler) validate() error {
@@ -102,14 +94,12 @@ func (h *ScanHandler) Handle(ctx context.Context, f models.File, oldFile models.
 		}
 	}
 
-	// try to match the file to a scene
 	existing, err := h.CreatorUpdater.FindByFileID(ctx, f.Base().ID)
 	if err != nil {
 		return fmt.Errorf("finding existing scene: %w", err)
 	}
 
 	if len(existing) == 0 {
-		// try also to match file by fingerprints
 		existing, err = h.CreatorUpdater.FindByFingerprints(ctx, videoFile.Fingerprints.Filter(matchableFingerprintTypes...))
 		if err != nil {
 			return fmt.Errorf("finding existing scene by fingerprints: %w", err)
@@ -122,7 +112,6 @@ func (h *ScanHandler) Handle(ctx context.Context, f models.File, oldFile models.
 			return err
 		}
 	} else {
-		// create a new scene
 		newScene := models.NewScene()
 
 		logger.Infof("%s doesn't exist. Creating new scene...", f.Base().Path)
@@ -137,7 +126,6 @@ func (h *ScanHandler) Handle(ctx context.Context, f models.File, oldFile models.
 	}
 
 	if oldFile != nil {
-		// migrate hashes from the old file to the new
 		oldHash := GetHash(oldFile, h.FileNamingAlgorithm)
 		newHash := GetHash(f, h.FileNamingAlgorithm)
 
@@ -150,7 +138,6 @@ func (h *ScanHandler) Handle(ctx context.Context, f models.File, oldFile models.
 		return err
 	}
 
-	// Assign folder-based tags if configured.
 	if h.FolderTagManager != nil && len(h.LibraryRoots) > 0 {
 		for _, s := range existing {
 			if s.Path == "" {
@@ -164,11 +151,9 @@ func (h *ScanHandler) Handle(ctx context.Context, f models.File, oldFile models.
 		}
 	}
 
-	// do this after the commit so that cover generation doesn't hold up the transaction
 	txn.AddPostCommitHook(ctx, func(ctx context.Context) {
 		for _, s := range existing {
 			if err := h.ScanGenerator.Generate(ctx, s, videoFile); err != nil {
-				// just log if cover generation fails. We can try again on rescan
 				logger.Errorf("Error generating content for %s: %v", videoFile.Path, err)
 			}
 		}
@@ -200,7 +185,6 @@ func (h *ScanHandler) associateExisting(ctx context.Context, existing []*models.
 		}
 
 		if !found || updateExisting {
-			// update updated_at time when file association or content changes
 			scenePartial := models.NewScenePartial()
 			if _, err := h.CreatorUpdater.UpdatePartial(ctx, s.ID, scenePartial); err != nil {
 				return fmt.Errorf("updating scene: %w", err)
@@ -222,14 +206,12 @@ func (h *ScanHandler) associateGallery(ctx context.Context, existing []*models.S
 	path := f.Base().Path
 	zipPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".zip"
 
-	// find galleries with a file that matches
 	galleries, err := h.GalleryFinderUpdater.FindByPath(ctx, zipPath)
 	if err != nil {
 		return err
 	}
 
 	for _, gallery := range galleries {
-		// found related Scene
 		logger.Infof("associate: Scene %s is related to gallery: %d", path, gallery.ID)
 		if err := h.GalleryFinderUpdater.AddSceneIDs(ctx, gallery.ID, sceneIDs); err != nil {
 			return err
