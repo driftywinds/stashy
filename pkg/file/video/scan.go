@@ -13,12 +13,21 @@ import (
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/logger"
 	"github.com/stashapp/stash/pkg/models"
+	"github.com/stashapp/stash/pkg/txn"
 )
 
 // Decorator adds video specific fields to a File.
 type Decorator struct {
 	FFProbe *ffmpeg.FFProbe
 	FFMpeg  *ffmpeg.FFMpeg
+
+	// CaptionRepo, if set, is used to immediately register extracted VTT
+	// sidecar files in the database right after writing them.  Without this
+	// the files are written to disk but the scanner's directory walk has
+	// already finished, so AssociateCaptions is never called for them.
+	CaptionRepo CaptionUpdater
+	FileFinder  models.FileFinder
+	TxnManager  models.TxnManager
 }
 
 func (d *Decorator) Decorate(ctx context.Context, fs models.FS, f models.File) (models.File, error) {
@@ -49,10 +58,17 @@ func (d *Decorator) Decorate(ctx context.Context, fs models.FS, f models.File) (
 		interactive = true
 	}
 
-	// Extract embedded subtitle streams to VTT sidecar files so that the
-	// existing caption-association pipeline can pick them up automatically.
+	// Extract embedded subtitle streams to VTT sidecar files.
+	// After writing each file, immediately call AssociateCaptions so that
+	// the captions are registered in the DB even though the directory walker
+	// has already finished by the time extraction runs.
 	if d.FFMpeg != nil && len(videoFile.SubtitleStreams) > 0 {
-		extractEmbeddedSubtitles(ctx, d.FFMpeg, base.Path, videoFile.SubtitleStreams)
+		extracted := extractEmbeddedSubtitles(ctx, d.FFMpeg, base.Path, videoFile.SubtitleStreams)
+		if d.CaptionRepo != nil && d.FileFinder != nil && d.TxnManager != nil {
+			for _, vttPath := range extracted {
+				AssociateCaptions(ctx, vttPath, d.TxnManager, d.FileFinder, d.CaptionRepo)
+			}
+		}
 	}
 
 	return &models.VideoFile{
@@ -93,20 +109,18 @@ func (d *Decorator) IsMissingMetadata(ctx context.Context, fs models.FS, f model
 }
 
 // extractEmbeddedSubtitles extracts each embedded subtitle stream from the
-// video file as a VTT sidecar file placed alongside the video. The sidecar
-// filename follows the convention the existing caption pipeline expects:
-//
-//	<video-basename>.<lang>.vtt   — e.g. "Movie.en.vtt"
-//	<video-basename>.vtt          — when no language tag is present
-//
-// Already-extracted files are skipped so re-scanning is cheap.
-func extractEmbeddedSubtitles(ctx context.Context, enc *ffmpeg.FFMpeg, videoPath string, streams []ffmpeg.FFProbeStream) {
+// video file as a VTT sidecar file placed alongside the video. Returns the
+// list of VTT paths that were successfully written (skips already-existing
+// files and streams that can't be converted).
+func extractEmbeddedSubtitles(ctx context.Context, enc *ffmpeg.FFMpeg, videoPath string, streams []ffmpeg.FFProbeStream) []string {
 	ext := filepath.Ext(videoPath)
 	base := strings.TrimSuffix(videoPath, ext)
 
 	// track which language codes we've already written so that when multiple
 	// streams share the same language we append a numeric disambiguator.
 	langCount := make(map[string]int)
+
+	var written []string
 
 	for _, s := range streams {
 		lang := strings.ToLower(strings.TrimSpace(s.Tags.Language))
@@ -139,12 +153,14 @@ func extractEmbeddedSubtitles(ctx context.Context, enc *ffmpeg.FFMpeg, videoPath
 		// Skip if already extracted (avoids re-running ffmpeg on every rescan).
 		if exists, _ := fsutil.FileExists(outPath); exists {
 			logger.Debugf("[subtitles] skipping already-extracted %s", outPath)
+			// Still register it — DB entry may be missing from a previous scan.
+			written = append(written, outPath)
 			continue
 		}
 
 		logger.Infof("[subtitles] extracting stream #%d (%s) from %s → %s", s.Index, lang, videoPath, outPath)
 
-		// ffmpeg -i <input> -map 0:<stream-index> -f webvtt <output>
+		// ffmpeg -i <input> -map 0:<stream-index> -f webvtt <o>
 		args := []string{
 			"-hide_banner",
 			"-loglevel", "error",
@@ -163,7 +179,10 @@ func extractEmbeddedSubtitles(ctx context.Context, enc *ffmpeg.FFMpeg, videoPath
 			logger.Warnf("[subtitles] ffmpeg could not extract stream #%d from %s: %v — %s", s.Index, videoPath, err, string(out))
 			// Remove a partial output file if ffmpeg created one.
 			_ = os.Remove(outPath)
+			continue
 		}
-	}
-}
 
+		written = append(written, outPath)
+	}
+
+	return written

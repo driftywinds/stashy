@@ -129,8 +129,11 @@ func (s *Manager) Scan(ctx context.Context, input ScanMetadataInput) (int, error
 		FileDecorators: []file.Decorator{
 			&file.FilteredDecorator{
 				Decorator: &video.Decorator{
-					FFProbe: s.FFProbe,
-					FFMpeg:  s.FFMpeg,
+					FFProbe:     s.FFProbe,
+					FFMpeg:      s.FFMpeg,
+					CaptionRepo: s.Repository.File,
+					FileFinder:  s.Repository.File,
+					TxnManager:  s.Repository.TxnManager,
 				},
 				Filter: file.FilterFunc(videoFileFilter),
 			},
