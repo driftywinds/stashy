@@ -18,9 +18,12 @@ type FolderTagManager interface {
 }
 
 // FolderSceneUpdater is the scene-side repository needed for folder tag assignment.
+// Only the two methods we actually call are required — avoids pulling in the
+// full SceneUpdater interface (which also demands Update()) that ScanCreatorUpdater
+// does not implement.
 type FolderSceneUpdater interface {
-	models.TagIDLoader
-	models.SceneUpdater
+	GetTagIDs(ctx context.Context, sceneID int) ([]int, error)
+	UpdatePartial(ctx context.Context, id int, updatedScene models.ScenePartial) (*models.Scene, error)
 }
 
 // TagsFromFolderPath derives the ordered list of tag names that should be
