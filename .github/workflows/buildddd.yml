@@ -5,65 +5,69 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
-  workflow_dispatch: # lets you trigger it manually from the GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       # ── 1. Checkout ────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       # ── 2. Go toolchain ────────────────────────────────────────────────────
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24.3"
-          cache: true                 # caches the Go module download cache
+          go-version-file: go.mod
+          cache: true
 
-      # ── 3. Node.js + pnpm ──────────────────────────────────────────────────
+      # ── 3. pnpm (version read from packageManager field in package.json) ───
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ui/v2.5/package.json
+
+      # ── 4. Node.js ─────────────────────────────────────────────────────────
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: pnpm
+          cache-dependency-path: ui/v2.5/pnpm-lock.yaml
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "10.30.3"          # must match packageManager field in package.json
-
-      # ── 4. Install C compiler (required by go-sqlite3) ─────────────────────
-      - name: Install GCC
-        run: sudo apt-get install -y gcc
-
-      # ── 5. Generate GraphQL types (frontend needs these before building) ───
-      - name: Generate GraphQL types
+      # ── 5. Install frontend dependencies ───────────────────────────────────
+      - name: Install UI dependencies
         working-directory: ui/v2.5
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm run gqlgen
+        run: pnpm install --frozen-lockfile
 
-      # ── 6. Build the frontend ──────────────────────────────────────────────
-      - name: Build frontend
-        working-directory: ui/v2.5
-        run: pnpm run build
+      # ── 6. Generate — runs both generate-backend (go generate ./cmd/stash)
+      #        and generate-ui (pnpm gqlgen). This produces:
+      #          • internal/api/generated_exec.go
+      #          • internal/api/generated_models.go
+      #          • ui/v2.5/src/core/generated-graphql.ts
+      # ───────────────────────────────────────────────────────────────────────
+      - name: Generate (backend + frontend GraphQL types)
+        run: make generate
 
-      # ── 7. Generate login locale (embeds the login page translations) ──────
-      - name: Generate login locale
-        run: go generate ./ui
+      # ── 7. Build UI (pnpm build + login locale embed → ui/v2.5/build/) ─────
+      - name: Build UI
+        run: make ui
 
-      # ── 8. Build the Go backend ────────────────────────────────────────────
+      # ── 8. Build Go binary (CGO_ENABLED=1 required for go-sqlite3) ─────────
       - name: Build backend
         env:
-          CGO_ENABLED: "1"            # required for go-sqlite3
+          CGO_ENABLED: "1"
         run: go build -o stash ./cmd/stash/
 
-      # ── 9. Upload the binary as a build artifact ───────────────────────────
+      # ── 9. Upload binary so you can download and test it ───────────────────
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: stash-linux
           path: stash
-          retention-days: 7           # keeps it for a week so you can download and test
+          retention-days: 7
