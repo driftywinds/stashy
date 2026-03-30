@@ -1,0 +1,20 @@
+services:
+  stashy:
+    image: ghcr.io/driftywinds/stashy:latest
+    container_name: stashy
+
+    restart: unless-stopped
+
+    ports:
+      - "9998:9999"
+
+    environment:
+      STASH_CONFIG_FILE: /config/config.yml
+
+    volumes:
+      - ./config:/config
+      - /your/media/path:/media
+
+    mem_limit: 1g           # hard ceiling — container is killed if exceeded
+    mem_reservation: 512m   # soft reservation — guaranteed minimum
+    memswap_limit: 1g       # swap ceiling (same as mem_limit = no extra swap)
