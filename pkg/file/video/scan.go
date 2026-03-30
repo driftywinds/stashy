@@ -13,7 +13,6 @@ import (
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/logger"
 	"github.com/stashapp/stash/pkg/models"
-	"github.com/stashapp/stash/pkg/txn"
 )
 
 // Decorator adds video specific fields to a File.
