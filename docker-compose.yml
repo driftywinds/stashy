@@ -7,7 +7,9 @@ services:
 
     ports:
       - "9998:9999"
-
+      - "1338:1338"
+      - "1900:1900/udp"
+   #network_mode: host     # if you don't want to deal with ports and / or have problmes with the DLNA discovery
     environment:
       STASH_CONFIG_FILE: /config/config.yml
 
