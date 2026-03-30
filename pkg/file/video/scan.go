@@ -185,3 +185,4 @@ func extractEmbeddedSubtitles(ctx context.Context, enc *ffmpeg.FFMpeg, videoPath
 	}
 
 	return written
+}
