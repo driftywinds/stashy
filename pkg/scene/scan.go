@@ -32,6 +32,7 @@ type ScanCreatorUpdater interface {
 	AddFileID(ctx context.Context, id int, fileID models.FileID) error
 
 	models.TagIDLoader
+	models.SceneGroupLoader
 }
 
 type ScanGalleryFinderUpdater interface {
@@ -54,8 +55,8 @@ type ScanHandler struct {
 	FileNamingAlgorithm models.HashAlgorithm
 	Paths               *paths.Paths
 
-	FolderTagManager FolderTagManager
-	LibraryRoots     []string
+	FolderGroupManager FolderGroupManager
+	LibraryRoots       []string
 }
 
 func (h *ScanHandler) validate() error {
@@ -138,15 +139,15 @@ func (h *ScanHandler) Handle(ctx context.Context, f models.File, oldFile models.
 		return err
 	}
 
-	if h.FolderTagManager != nil && len(h.LibraryRoots) > 0 {
+	if h.FolderGroupManager != nil && len(h.LibraryRoots) > 0 {
 		for _, s := range existing {
 			if s.Path == "" {
 				if err := s.LoadFiles(ctx, h.CreatorUpdater); err == nil && s.Files.Primary() != nil {
 					s.Path = s.Files.Primary().Base().Path
 				}
 			}
-			if err := AssignFolderTags(ctx, s, h.FolderTagManager, h.CreatorUpdater, h.LibraryRoots); err != nil {
-				logger.Warnf("folder tag assignment for scene %d: %v", s.ID, err)
+			if err := AssignFolderGroups(ctx, s, h.FolderGroupManager, h.CreatorUpdater, h.LibraryRoots); err != nil {
+				logger.Warnf("folder group assignment for scene %d: %v", s.ID, err)
 			}
 		}
 	}
