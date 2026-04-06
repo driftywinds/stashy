@@ -896,4 +896,3 @@ func (g *sceneGenerators) Generate(ctx context.Context, s *models.Scene, f *mode
 
 	return nil
 }
-

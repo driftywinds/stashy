@@ -42,7 +42,6 @@ func GroupsFromFolderPath(filePath string, libraryRoots []string) []string {
 			continue
 		}
 		parts := strings.Split(filepath.ToSlash(rel), "/")
-		// Return a copy so callers cannot mutate the slice.
 		result := make([]string, len(parts))
 		copy(result, parts)
 		return result
@@ -56,6 +55,9 @@ func GroupsFromFolderPath(filePath string, libraryRoots []string) []string {
 //
 // Group names are the bare directory names. Returns group IDs in order
 // (shallowest first).
+//
+// For already-existing groups the containing-group link is added if missing,
+// using an unconditional ADD partial update (the sqlite layer deduplicates).
 func EnsureFolderGroups(ctx context.Context, groupRW FolderGroupManager, groupNames []string) ([]int, error) {
 	ids := make([]int, 0, len(groupNames))
 	var parentID *int
@@ -66,64 +68,48 @@ func EnsureFolderGroups(ctx context.Context, groupRW FolderGroupManager, groupNa
 			return nil, fmt.Errorf("finding group %q: %w", name, err)
 		}
 
+		var groupID int
+
 		if existing != nil {
-			ids = append(ids, existing.ID)
-			pid := existing.ID
-			// If this group exists but is missing the containing-group link,
-			// add it now so the hierarchy stays correct.
+			groupID = existing.ID
+			// Always attempt to add the containing-group link. The sqlite layer
+			// uses an ADD mode which is idempotent — it won't create duplicates.
 			if parentID != nil {
-				if err := ensureContainingGroup(ctx, groupRW, existing.ID, *parentID); err != nil {
+				if err := addContainingGroup(ctx, groupRW, groupID, *parentID); err != nil {
 					return nil, err
 				}
 			}
-			parentID = &pid
-			continue
+		} else {
+			now := time.Now()
+			newGroup := &models.Group{
+				Name:      name,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+			if parentID != nil {
+				newGroup.ContainingGroups = models.NewRelatedGroupDescriptions([]models.GroupIDDescription{
+					{GroupID: *parentID},
+				})
+			}
+
+			if err := groupRW.Create(ctx, newGroup); err != nil {
+				return nil, fmt.Errorf("creating folder group %q: %w", name, err)
+			}
+			logger.Infof("[folder-groups] created group %q (id=%d)", name, newGroup.ID)
+			groupID = newGroup.ID
 		}
 
-		now := time.Now()
-		newGroup := &models.Group{
-			Name:      name,
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		if parentID != nil {
-			newGroup.ContainingGroups = models.NewRelatedGroupDescriptions([]models.GroupIDDescription{
-				{GroupID: *parentID},
-			})
-		}
-
-		if err := groupRW.Create(ctx, newGroup); err != nil {
-			return nil, fmt.Errorf("creating folder group %q: %w", name, err)
-		}
-		logger.Infof("[folder-groups] created group %q (id=%d)", name, newGroup.ID)
-
-		ids = append(ids, newGroup.ID)
-		pid := newGroup.ID
+		ids = append(ids, groupID)
+		pid := groupID
 		parentID = &pid
 	}
 	return ids, nil
 }
 
-// ensureContainingGroup adds parentID as a containing group of childID if the
-// relationship does not already exist.
-func ensureContainingGroup(ctx context.Context, groupRW FolderGroupManager, childID, parentID int) error {
-	child, err := groupRW.Find(ctx, childID)
-	if err != nil {
-		return fmt.Errorf("finding group %d: %w", childID, err)
-	}
-	if child == nil {
-		return fmt.Errorf("group %d not found", childID)
-	}
-
-	// Check if the containing relationship already exists.
-	if child.ContainingGroups.Loaded() {
-		for _, desc := range child.ContainingGroups.List() {
-			if desc.GroupID == parentID {
-				return nil // already present
-			}
-		}
-	}
-
+// addContainingGroup adds parentID as a containing group of childID via an ADD
+// partial update. The sqlite layer deduplicates so this is safe to call even if
+// the relationship already exists.
+func addContainingGroup(ctx context.Context, groupRW FolderGroupManager, childID, parentID int) error {
 	partial := models.GroupPartial{
 		ContainingGroups: &models.UpdateGroupDescriptions{
 			Groups: []models.GroupIDDescription{{GroupID: parentID}},
@@ -156,36 +142,33 @@ func AssignFolderGroups(ctx context.Context, s *models.Scene, groupRW FolderGrou
 		return err
 	}
 
-	// Load existing scene groups.
+	// We only want to assign the leaf (deepest/most-specific) group to the
+	// scene — the hierarchy is expressed via containing-groups on the groups
+	// themselves, so assigning the leaf is sufficient and avoids scenes
+	// appearing under every ancestor group redundantly.
+	leafID := groupIDs[len(groupIDs)-1]
+
+	// Load existing scene groups so we don't add a duplicate.
 	existing, err := sceneRW.GetGroups(ctx, s.ID)
 	if err != nil {
 		return fmt.Errorf("loading groups for scene %d: %w", s.ID, err)
 	}
 
-	existingSet := make(map[int]struct{}, len(existing))
 	for _, gs := range existing {
-		existingSet[gs.GroupID] = struct{}{}
-	}
-
-	var toAdd []models.GroupsScenes
-	for _, id := range groupIDs {
-		if _, found := existingSet[id]; !found {
-			toAdd = append(toAdd, models.GroupsScenes{GroupID: id})
+		if gs.GroupID == leafID {
+			return nil // already assigned
 		}
-	}
-	if len(toAdd) == 0 {
-		return nil
 	}
 
 	partial := models.ScenePartial{
 		GroupIDs: &models.UpdateGroupIDs{
-			Groups: toAdd,
+			Groups: []models.GroupsScenes{{GroupID: leafID}},
 			Mode:   models.RelationshipUpdateModeAdd,
 		},
 	}
 	if _, err := sceneRW.UpdatePartial(ctx, s.ID, partial); err != nil {
 		return fmt.Errorf("updating scene %d groups: %w", s.ID, err)
 	}
-	logger.Debugf("[folder-groups] assigned groups %v to scene %d", groupNames, s.ID)
+	logger.Debugf("[folder-groups] assigned leaf group %q (id=%d) to scene %d", groupNames[len(groupNames)-1], leafID, s.ID)
 	return nil
 }
