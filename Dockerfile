@@ -4,11 +4,9 @@
 # Supports: linux/amd64, linux/arm64, linux/arm/v7, linux/arm/v6
 # Build args:
 #   RELEASE_TAG  — release tag to pull binaries from (default: latest_develop)
+#   BUILD_DATE   — cache-busting arg, injected automatically by the workflow
 
 FROM debian:bookworm-slim
-
-ARG RELEASE_TAG=latest_develop
-ARG TARGETPLATFORM
 
 # ffmpeg  — needed for transcoding and subtitle extraction
 # wget    — used to download the binary below
@@ -19,6 +17,12 @@ RUN apt-get update && \
         wget \
         ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
+# Declared after apt-get so this layer and everything below is always
+# re-run on every build, guaranteeing a fresh binary is downloaded
+ARG BUILD_DATE
+ARG RELEASE_TAG=latest_develop
+ARG TARGETPLATFORM
 
 # Pick the right binary for the target platform and download it
 RUN set -eux; \
@@ -37,11 +41,9 @@ RUN set -eux; \
 # /config  — config file, database, cache, generated content
 # /media   — your media library (mount as many as you need)
 VOLUME ["/config", "/media"]
-
 EXPOSE 9999
 
 # STASH_CONFIG_FILE tells stashy where to read/write its config.
 # --nobrowser stops it trying to open a browser inside the container.
 ENV STASH_CONFIG_FILE=/config/config.yml
-
 ENTRYPOINT ["/usr/local/bin/stashy", "--nobrowser"]

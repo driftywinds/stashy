@@ -71,6 +71,7 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6
           build-args: |
             RELEASE_TAG=${{ steps.tags.outputs.release_tag }}
+            BUILD_DATE=${{ github.run_id }}-${{ github.run_attempt }}
           tags: ${{ steps.tags.outputs.full_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
