@@ -57,6 +57,11 @@ type ScanHandler struct {
 
 	FolderGroupManager FolderGroupManager
 	LibraryRoots       []string
+
+	// groupCache is allocated once on the first scan Handle call and reused
+	// for the lifetime of this ScanHandler (one full scan pass).
+	// It prevents duplicate groups_relations INSERT attempts.
+	groupCache *folderGroupCache
 }
 
 func (h *ScanHandler) validate() error {
@@ -140,13 +145,16 @@ func (h *ScanHandler) Handle(ctx context.Context, f models.File, oldFile models.
 	}
 
 	if h.FolderGroupManager != nil && len(h.LibraryRoots) > 0 {
+		if h.groupCache == nil {
+			h.groupCache = newFolderGroupCache()
+		}
 		for _, s := range existing {
 			if s.Path == "" {
 				if err := s.LoadFiles(ctx, h.CreatorUpdater); err == nil && s.Files.Primary() != nil {
 					s.Path = s.Files.Primary().Base().Path
 				}
 			}
-			if err := AssignFolderGroups(ctx, s, h.FolderGroupManager, h.CreatorUpdater, h.LibraryRoots); err != nil {
+			if err := AssignFolderGroups(ctx, s, h.FolderGroupManager, h.CreatorUpdater, h.LibraryRoots, h.groupCache); err != nil {
 				logger.Warnf("folder group assignment for scene %d: %v", s.ID, err)
 			}
 		}
