@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Docker image tag to push (e.g. latest, v0.27.0, dev)"
+        description: "Docker image tag(s) to push — comma-separated (e.g. latest,v0.1.1)"
         required: true
         default: "latest"
       release_tag:
@@ -32,9 +32,22 @@ jobs:
             RELEASE_TAG="${{ inputs.release_tag }}"
             IMAGE_TAG="${{ inputs.image_tag }}"
           fi
+
+          # Prefix every comma-separated tag with the full registry path
+          FULL_TAGS=""
+          IFS=',' read -ra TAGS <<< "$IMAGE_TAG"
+          for tag in "${TAGS[@]}"; do
+            tag="${tag// /}"  # trim whitespace
+            FULL_TAGS="${FULL_TAGS}ghcr.io/driftywinds/stashy:${tag}"$'\n'
+          done
+
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "image_tag=$IMAGE_TAG"     >> "$GITHUB_OUTPUT"
-          echo "Using release: $RELEASE_TAG → image tag: $IMAGE_TAG"
+          {
+            echo "full_tags<<EOF"
+            printf '%s' "$FULL_TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Using release: $RELEASE_TAG → image tags:"$'\n'"$FULL_TAGS"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -50,7 +63,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push
-        uses: docker/build-push-action@v6  # ← was @v5, this fixes the bug
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
@@ -58,8 +71,7 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6
           build-args: |
             RELEASE_TAG=${{ steps.tags.outputs.release_tag }}
-          tags: |
-            ghcr.io/driftywinds/stashy:${{ steps.tags.outputs.image_tag }}
+          tags: ${{ steps.tags.outputs.full_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           labels: |
